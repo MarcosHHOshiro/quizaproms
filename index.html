@@ -183,6 +183,12 @@
       font-size: 0.94rem;
     }
 
+    .last-result {
+      margin: -6px 0 16px;
+      color: var(--ink);
+      font-weight: 700;
+    }
+
     .btn {
       width: 100%;
       border: 1px solid #4f3b24;
@@ -377,6 +383,7 @@
       <h1>Quiz: Marie Curie</h1>
       <p class="subtitle">Teste seus conhecimentos sobre uma das cientistas mais importantes da história.</p>
       <p class="lock-note hidden" id="lock-note">Este quiz já foi concluído neste navegador. O acesso está bloqueado.</p>
+      <p class="last-result hidden" id="last-result"></p>
       <button class="btn" id="start-btn">Começar</button>
     </section>
 
@@ -452,6 +459,7 @@
     const startBtn = document.getElementById("start-btn");
     const restartBtn = document.getElementById("restart-btn");
     const lockNote = document.getElementById("lock-note");
+    const lastResult = document.getElementById("last-result");
     const nextBtn = document.getElementById("next-btn");
 
     const questionCounter = document.getElementById("question-counter");
@@ -465,11 +473,14 @@
     const factText = document.getElementById("fact-text");
     const finalScore = document.getElementById("final-score");
     const STORAGE_KEY = "quiz_jogado";
+    const STATE_KEY = "quiz_estado";
+    const RESULT_KEY = "quiz_resultado";
 
     let currentQuestion = 0;
     let score = 0;
     let locked = false;
     let quizLocked = false;
+    let answersHistory = Array(questions.length).fill(null);
 
     // Leitura segura do localStorage (pode falhar em alguns modos de privacidade).
     function hasPlayedQuiz() {
@@ -486,6 +497,128 @@
       } catch (error) {
         // Mantem o fluxo do jogo mesmo sem persistencia.
       }
+    }
+
+    function saveFinalResult(finalPoints) {
+      try {
+        const payload = {
+          score: finalPoints,
+          total: questions.length
+        };
+        localStorage.setItem(RESULT_KEY, JSON.stringify(payload));
+      } catch (error) {
+        // Mantem o fluxo mesmo sem persistencia.
+      }
+    }
+
+    function loadFinalResult() {
+      try {
+        const raw = localStorage.getItem(RESULT_KEY);
+        if (!raw) return null;
+
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return null;
+        if (!Number.isInteger(parsed.score) || !Number.isInteger(parsed.total)) return null;
+        if (parsed.score < 0 || parsed.total !== questions.length || parsed.score > parsed.total) return null;
+
+        return parsed;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function renderLastResult() {
+      const result = loadFinalResult();
+      if (!result) {
+        lastResult.classList.add("hidden");
+        return;
+      }
+
+      lastResult.textContent = `Último resultado: ${result.score} de ${result.total}`;
+      lastResult.classList.remove("hidden");
+    }
+
+    function clearQuizState() {
+      try {
+        localStorage.removeItem(STATE_KEY);
+      } catch (error) {
+        // Ignora erros de persistencia para nao travar o quiz.
+      }
+    }
+
+    function calculateScore(history) {
+      return history.reduce((total, selectedIndex, index) => {
+        if (selectedIndex === null) return total;
+        return total + (selectedIndex === questions[index].correctIndex ? 1 : 0);
+      }, 0);
+    }
+
+    function saveQuizState() {
+      if (quizLocked || hasPlayedQuiz()) {
+        clearQuizState();
+        return;
+      }
+
+      try {
+        const payload = {
+          currentQuestion,
+          answersHistory
+        };
+        localStorage.setItem(STATE_KEY, JSON.stringify(payload));
+      } catch (error) {
+        // Ignora erros de persistencia para manter o jogo funcional.
+      }
+    }
+
+    function loadQuizState() {
+      try {
+        const raw = localStorage.getItem(STATE_KEY);
+        if (!raw) return null;
+
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return null;
+
+        if (!Number.isInteger(parsed.currentQuestion)) return null;
+        if (parsed.currentQuestion < 0 || parsed.currentQuestion >= questions.length) return null;
+
+        if (!Array.isArray(parsed.answersHistory)) return null;
+
+        const normalizedAnswers = Array(questions.length).fill(null);
+        parsed.answersHistory.forEach((answer, index) => {
+          if (
+            index < questions.length &&
+            Number.isInteger(answer) &&
+            answer >= 0 &&
+            answer < questions[index].options.length
+          ) {
+            normalizedAnswers[index] = answer;
+          }
+        });
+
+        const answeredCount = normalizedAnswers.filter((answer) => answer !== null).length;
+        const normalizedQuestion = Math.min(parsed.currentQuestion, answeredCount, questions.length - 1);
+
+        return {
+          currentQuestion: normalizedQuestion,
+          answersHistory: normalizedAnswers
+        };
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function restoreQuizState(state) {
+      currentQuestion = state.currentQuestion;
+      answersHistory = state.answersHistory;
+      score = calculateScore(answersHistory);
+      locked = false;
+    }
+
+    function resetQuizState() {
+      currentQuestion = 0;
+      score = 0;
+      locked = false;
+      answersHistory = Array(questions.length).fill(null);
     }
 
     function lockQuizAccess() {
@@ -512,6 +645,32 @@
       progressFill.style.width = `${(currentQuestion / total) * 100}%`;
     }
 
+    function showAnsweredState(selectedIndex, animate = false) {
+      const data = questions[currentQuestion];
+      const buttons = [...answersEl.querySelectorAll(".answer-btn")];
+      const isCorrect = selectedIndex === data.correctIndex;
+
+      locked = true;
+      scoreCounter.textContent = `Pontos: ${score}`;
+
+      buttons.forEach((button, index) => {
+        button.disabled = true;
+        if (index === data.correctIndex) button.classList.add("correct");
+        if (index === selectedIndex && !isCorrect) button.classList.add("wrong");
+      });
+
+      statusText.textContent = isCorrect ? "Acertou!" : "Errou!";
+      factText.textContent = `Curiosidade: ${data.fact}`;
+      feedbackBox.classList.remove("hidden");
+
+      nextBtn.textContent = currentQuestion === questions.length - 1 ? "Ver resultado" : "Próxima";
+      progressFill.style.width = `${((currentQuestion + 1) / questions.length) * 100}%`;
+
+      if (animate) {
+        flashResult(isCorrect ? "correct" : "wrong");
+      }
+    }
+
     function renderQuestion() {
       locked = false;
       feedbackBox.classList.add("hidden");
@@ -529,6 +688,11 @@
         button.addEventListener("click", () => handleAnswer(index));
         answersEl.appendChild(button);
       });
+
+      const savedAnswer = answersHistory[currentQuestion];
+      if (savedAnswer !== null) {
+        showAnsweredState(savedAnswer);
+      }
     }
 
     function flashResult(type) {
@@ -542,28 +706,10 @@
       if (locked) return;
       locked = true;
 
-      const data = questions[currentQuestion];
-      const buttons = [...answersEl.querySelectorAll(".answer-btn")];
-      const isCorrect = selectedIndex === data.correctIndex;
-
-      if (isCorrect) score += 1;
-      scoreCounter.textContent = `Pontos: ${score}`;
-
-      buttons.forEach((button, index) => {
-        button.disabled = true;
-        if (index === data.correctIndex) button.classList.add("correct");
-        if (index === selectedIndex && !isCorrect) button.classList.add("wrong");
-      });
-
-      statusText.textContent = isCorrect ? "Acertou!" : "Errou!";
-      factText.textContent = `Curiosidade: ${data.fact}`;
-      feedbackBox.classList.remove("hidden");
-
-      nextBtn.textContent = currentQuestion === questions.length - 1 ? "Ver resultado" : "Próxima";
-      flashResult(isCorrect ? "correct" : "wrong");
-
-      // Atualiza a barra para refletir a pergunta respondida.
-      progressFill.style.width = `${((currentQuestion + 1) / questions.length) * 100}%`;
+      answersHistory[currentQuestion] = selectedIndex;
+      score = calculateScore(answersHistory);
+      saveQuizState();
+      showAnsweredState(selectedIndex, true);
     }
 
     function startQuiz() {
@@ -573,8 +719,14 @@
         return;
       }
 
-      currentQuestion = 0;
-      score = 0;
+      const savedState = loadQuizState();
+      if (savedState) {
+        restoreQuizState(savedState);
+      } else {
+        resetQuizState();
+        saveQuizState();
+      }
+
       showScreen(quizScreen);
       renderQuestion();
     }
@@ -582,6 +734,7 @@
     function goNext() {
       currentQuestion += 1;
       if (currentQuestion < questions.length) {
+        saveQuizState();
         renderQuestion();
       } else {
         showResult();
@@ -589,7 +742,9 @@
     }
 
     function showResult() {
+      saveFinalResult(score);
       savePlayedQuiz();
+      clearQuizState();
       lockQuizAccess();
       finalScore.textContent = `Você acertou ${score} de ${questions.length}`;
       showScreen(endScreen);
@@ -597,6 +752,14 @@
 
     if (hasPlayedQuiz()) {
       lockQuizAccess();
+      renderLastResult();
+    } else {
+      const savedState = loadQuizState();
+      if (savedState) {
+        restoreQuizState(savedState);
+        showScreen(quizScreen);
+        renderQuestion();
+      }
     }
 
     startBtn.addEventListener("click", startQuiz);
